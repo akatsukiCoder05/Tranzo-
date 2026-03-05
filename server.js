@@ -20,10 +20,8 @@ io.on("connection", (socket) => {
 
     if (!roomId) return;
 
-    // store device name on socket
     socket.deviceName = deviceName || `User-${socket.id.substring(0, 5)}`;
 
-    // leave old room if any
     if (socket.roomId && socket.roomId !== roomId) {
       const old = socket.roomId;
       socket.leave(old);
@@ -41,6 +39,19 @@ io.on("connection", (socket) => {
     rooms[roomId].add(socket.id);
 
     io.to(roomId).emit("room-status", { room: roomId, users: rooms[roomId].size });
+  });
+
+  // ✅ Typing relay (WhatsApp-like)
+  socket.on("typing", ({ roomId, user }) => {
+    const r = roomId || socket.roomId;
+    if (!r) return;
+    socket.to(r).emit("typing", { user: user || socket.deviceName || "User" });
+  });
+
+  socket.on("stop-typing", ({ roomId }) => {
+    const r = roomId || socket.roomId;
+    if (!r) return;
+    socket.to(r).emit("stop-typing");
   });
 
   // ✅ UPDATED: message user = deviceName

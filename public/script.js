@@ -12,7 +12,7 @@ const statusText = document.getElementById("status");
 const connDot = document.getElementById("connDot");
 const roomHint = document.getElementById("roomHint");
 
-// ✅ NEW: device name input
+// ✅ device name input
 const deviceNameInput = document.getElementById("deviceName");
 
 const chatSection = document.getElementById("chatSection");
@@ -48,9 +48,9 @@ function defaultDeviceName() {
 
   const browser =
     ua.includes("Edg") ? "Edge" :
-    ua.includes("Chrome") ? "Chrome" :
-    ua.includes("Firefox") ? "Firefox" :
-    ua.includes("Safari") ? "Safari" : "Browser";
+      ua.includes("Chrome") ? "Chrome" :
+        ua.includes("Firefox") ? "Firefox" :
+          ua.includes("Safari") ? "Safari" : "Browser";
 
   return `${isMobile ? "Phone" : "PC"}-${browser}-${platform}`;
 }
@@ -68,6 +68,43 @@ if (deviceNameInput) {
   });
 }
 
+// ================= WhatsApp-like Chat UI (NO HTML change) =================
+(function injectChatStyles() {
+  const css = `
+    #chatBox { padding: 10px; }
+    .msgRow { display:flex; margin: 6px 0; }
+    .msgRow.mine { justify-content:flex-end; }
+    .msgRow.other { justify-content:flex-start; }
+    .bubble {
+      max-width: 72%;
+      padding: 10px 12px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.25;
+      box-shadow: 0 6px 14px rgba(0,0,0,.08);
+      word-break: break-word;
+    }
+    .bubble.mine { background: rgba(220,248,198,.95); }
+    .bubble.other { background: rgba(255,255,255,.92); }
+    .bubble .name { font-weight: 800; font-size: 12px; opacity: .75; margin-bottom: 4px; }
+    .typingLine { font-size: 13px; opacity: .75; padding: 6px 10px; }
+  `;
+  const style = document.createElement("style");
+  style.innerHTML = css;
+  document.head.appendChild(style);
+})();
+
+// Typing indicator (NO HTML change)
+const typingLine = document.createElement("div");
+typingLine.className = "typingLine";
+typingLine.style.display = "none";
+if (chatSection) chatSection.appendChild(typingLine);
+
+function showTyping(text) {
+  typingLine.innerText = text;
+  typingLine.style.display = text ? "block" : "none";
+}
+
 // Helpers
 function addMsg(html) {
   const div = document.createElement("div");
@@ -76,6 +113,24 @@ function addMsg(html) {
   chatBox.appendChild(div);
   chatBox.scrollTop = chatBox.scrollHeight;
 }
+
+function addChatBubble({ user, text, mine }) {
+  const row = document.createElement("div");
+  row.className = `msgRow ${mine ? "mine" : "other"}`;
+
+  const bubble = document.createElement("div");
+  bubble.className = `bubble ${mine ? "mine" : "other"}`;
+
+  bubble.innerHTML = `
+    <div class="name">${user}</div>
+    <div class="text">${text}</div>
+  `;
+
+  row.appendChild(bubble);
+  chatBox.appendChild(row);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
 function fmtBytes(bytes) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0, n = bytes;
@@ -147,40 +202,67 @@ socket.on("room-status", ({ room, users }) => {
 });
 
 // ================= Chat =================
+let typingTimer = null;
+
+messageInput?.addEventListener("input", () => {
+  // typing start
+  socket.emit("typing", { roomId: currentRoom, user: getDeviceName() });
+
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => {
+    socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
+  }, 900);
+});
+
+socket.on("typing", ({ user }) => {
+  if (!user) return;
+  showTyping(`${user} is typing...`);
+});
+
+socket.on("stop-typing", () => {
+  showTyping("");
+});
+
 sendBtn.onclick = () => {
   const message = messageInput.value.trim();
   if (!message) return;
+
   socket.emit("send-message", message);
+
+  // ✅ local echo (WhatsApp right side)
+  addChatBubble({ user: "You", text: message, mine: true });
+
   messageInput.value = "";
+  socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
 };
 
 // server sends user = deviceName
-socket.on("receive-message", (data) => addMsg(`<b>${data.user}:</b> ${data.text}`));
+socket.on("receive-message", (data) => {
+  // ✅ WhatsApp left side
+  addChatBubble({ user: data.user || "Peer", text: data.text || "", mine: false });
+});
 
 // ================= WebRTC =================
-// ✅ CHANGE: TURN added (remote / strict NAT fix). STUN-only often fails.
+// ✅ TURN config: aapko REAL creds Metered/Twilio dashboard se copy-paste karne honge
+// (Main fake creds invent nahi kar sakta.)
+// ================= WebRTC =================
 const RTC_CONFIG = {
   iceServers: [
-    // STUN (free)
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
 
-    // ✅ TURN (REQUIRED for many networks)
-    // Fill real TURN details here:
     {
       urls: [
-        "turn:YOUR_DOMAIN:3478?transport=udp",
-        "turn:YOUR_DOMAIN:3478?transport=tcp",
-        "turns:YOUR_DOMAIN:5349?transport=tcp"
+        "turn:global.relay.metered.ca:80?transport=udp",
+        "turn:global.relay.metered.ca:80?transport=tcp",
+        "turn:global.relay.metered.ca:443?transport=tcp",
+        "turns:global.relay.metered.ca:443?transport=tcp",
       ],
-      username: "TURN_USER",
-      credential: "TURN_PASS",
+      username: "a8d9d73530add1b926be15b7",
+      credential: "NgH88GxMUO1f4Knl",
     },
   ],
-
-  // Optional debug:
-  // iceTransportPolicy: "all",   // default
-  // iceTransportPolicy: "relay" // force TURN only (test)
+  iceTransportPolicy: "all",
 };
 
 let pc = null;
@@ -192,10 +274,11 @@ let outgoingFile = null;
 let fileWorker = null;
 
 // Tuning
-const CHUNK_SIZE = 64 * 1024;
-const BUFFER_LOW = 4 * 1024 * 1024;
-const BUFFER_MAX = 12 * 1024 * 1024;
-const ACK_EVERY_BYTES = 1 * 1024 * 1024;
+// Tuning (LAN + WAN both)
+const CHUNK_SIZE = 256 * 1024;          // ✅ 64KB -> 256KB
+const BUFFER_LOW = 8 * 1024 * 1024;     // ✅ 4MB -> 8MB
+const BUFFER_MAX = 64 * 1024 * 1024;    // ✅ 12MB -> 64MB
+const ACK_EVERY_BYTES = 4 * 1024 * 1024; // ✅ 1MB -> 4MB
 
 // IMPORTANT: memory limit
 const MEMORY_MAX_BYTES = 300 * 1024 * 1024;
@@ -252,7 +335,7 @@ function markReceiverReady(ok = true) {
   }
 }
 
-// ✅ NEW: retry guard
+// retry guard
 let retryInProgress = false;
 
 // Buttons
@@ -262,7 +345,7 @@ pauseBtn.onclick = () => {
   pauseBtn.disabled = true;
   resumeBtn.disabled = false;
   setStatus("⏸ Paused");
-  try { fileWorker?.postMessage({ type: "pause" }); } catch {}
+  try { fileWorker?.postMessage({ type: "pause" }); } catch { }
 };
 resumeBtn.onclick = () => {
   if (!sendState.running) return;
@@ -273,14 +356,14 @@ resumeBtn.onclick = () => {
   try {
     fileWorker?.postMessage({ type: "resume" });
     fileWorker?.postMessage({ type: "pull" });
-  } catch {}
+  } catch { }
 };
 cancelBtn.onclick = () => cancelTransfer("You canceled transfer", true);
 
 function safeClosePeer() {
   gracefulClosing = true;
-  try { dc?.close(); } catch {}
-  try { pc?.close(); } catch {}
+  try { dc?.close(); } catch { }
+  try { pc?.close(); } catch { }
   dc = null;
   pc = null;
   peerSocketId = null;
@@ -307,10 +390,10 @@ function cancelTransfer(reason, notifyPeer) {
 
   if (sendState.running) {
     sendState.canceled = true;
-    try { fileWorker?.postMessage({ type: "cancel" }); } catch {}
-    try { if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "cancel" })); } catch {}
+    try { fileWorker?.postMessage({ type: "cancel" }); } catch { }
+    try { if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "cancel" })); } catch { }
     if (notifyPeer && peerSocketId) {
-      try { socket.emit("file-cancel", { to: peerSocketId }); } catch {}
+      try { socket.emit("file-cancel", { to: peerSocketId }); } catch { }
     }
   }
 
@@ -326,35 +409,87 @@ socket.on("file-cancel", () => {
   cancelTransfer("Sender canceled transfer", false);
 });
 
+// ===== Extra log helpers (exact reason) =====
+async function logSelectedCandidatePair(tag = "") {
+  try {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    let selectedPair = null;
+
+    stats.forEach((r) => {
+      if (r.type === "transport" && r.selectedCandidatePairId) {
+        selectedPair = stats.get(r.selectedCandidatePairId);
+      }
+    });
+
+    if (!selectedPair) return;
+
+    const local = stats.get(selectedPair.localCandidateId);
+    const remote = stats.get(selectedPair.remoteCandidateId);
+
+    console.log("[P2P][SELECTED_PAIR]" + (tag ? `(${tag})` : ""), {
+      state: selectedPair.state,
+      localType: local?.candidateType,
+      localProtocol: local?.protocol,
+      localAddress: local?.address,
+      remoteType: remote?.candidateType,
+      remoteProtocol: remote?.protocol,
+      remoteAddress: remote?.address,
+      nominated: selectedPair.nominated,
+      currentRoundTripTime: selectedPair.currentRoundTripTime,
+      availableOutgoingBitrate: selectedPair.availableOutgoingBitrate,
+      bytesSent: selectedPair.bytesSent,
+      bytesReceived: selectedPair.bytesReceived,
+    });
+  } catch (e) {
+    console.log("[P2P] logSelectedCandidatePair error", e);
+  }
+}
+
 // Peer connection
 async function createPeerConnection() {
   pc = new RTCPeerConnection(RTC_CONFIG);
 
-  pc.oniceconnectionstatechange = () => {
-    console.log("[P2P] iceConnectionState:", pc.iceConnectionState);
+  pc.onicegatheringstatechange = () => {
+    console.log("[P2P] iceGatheringState:", pc.iceGatheringState);
   };
 
-  // ✅ CHANGE: auto-retry on failed (no unnecessary logic change)
+  pc.oniceconnectionstatechange = () => {
+    console.log("[P2P] iceConnectionState:", pc.iceConnectionState);
+
+    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+      logSelectedCandidatePair("ice");
+    }
+    if (pc.iceConnectionState === "failed") {
+      addMsg(`<span class="muted">⚠️ ICE failed. TURN required on many networks. Check TURN creds.</span>`);
+    }
+  };
+
+  // auto-retry on failed (kept minimal)
   pc.onconnectionstatechange = () => {
     console.log("[P2P] connectionState:", pc.connectionState);
 
+    if (pc.connectionState === "connected") {
+      setTimeout(() => logSelectedCandidatePair("after-connect"), 600);
+    }
+
+    if (pc.connectionState === "connected") {
+      logSelectedCandidatePair("conn");
+    }
+
     if (pc.connectionState === "failed") {
-      // Often means ICE failed (need TURN)
       addMsg(`<span class="muted">⚠️ Connection failed. Retrying...</span>`);
 
-      // avoid infinite loops
       if (retryInProgress) return;
       retryInProgress = true;
 
-      try { dc?.close(); } catch {}
-      try { pc?.close(); } catch {}
+      try { dc?.close(); } catch { }
+      try { pc?.close(); } catch { }
       dc = null;
       pc = null;
 
-      // retry after short delay if we still have peer
       if (peerSocketId && !transferCompleted && !sendState.canceled) {
         setTimeout(() => {
-          // If we were sender and have outgoing file, reconnect
           makeOfferAndConnect()
             .then(() => { retryInProgress = false; })
             .catch(() => { retryInProgress = false; });
@@ -367,11 +502,13 @@ async function createPeerConnection() {
 
   pc.onicecandidate = (e) => {
     if (e.candidate && peerSocketId) {
+      console.log("[P2P] ICE candidate:", e.candidate.candidate);
       socket.emit("webrtc-ice", { to: peerSocketId, candidate: e.candidate });
+    } else {
+      console.log("[P2P] ICE gathering complete");
     }
   };
 
-  // ✅ optional debug (helps when TURN creds wrong)
   pc.onicecandidateerror = (e) => {
     console.log("[P2P] icecandidateerror:", e?.errorCode, e?.errorText, e?.url);
   };
@@ -440,7 +577,7 @@ function setupDataChannel() {
         const r = incomingFile
           ? { receivedBytes: incomingFile.receivedBytes, size: incomingFile.meta.size, sawDone: incomingFile.sawDone }
           : { receivedBytes: 0, size: 0, sawDone: false };
-        try { dc.send(JSON.stringify({ type: "status-res", ...r })); } catch {}
+        try { dc.send(JSON.stringify({ type: "status-res", ...r })); } catch { }
         return;
       }
 
@@ -509,7 +646,9 @@ socket.on("webrtc-answer", async ({ sdp }) => {
 });
 
 socket.on("webrtc-ice", async ({ candidate }) => {
-  try { await pc.addIceCandidate(candidate); } catch {}
+  try { await pc.addIceCandidate(candidate); } catch (e) {
+    console.log("[P2P] addIceCandidate error", e);
+  }
 });
 
 // File offer UI
@@ -783,7 +922,7 @@ async function sendFile(file) {
               dc.send(JSON.stringify({ type: "done" }));
               dc.send(JSON.stringify({ type: "status-req" }));
             }
-          } catch {}
+          } catch { }
         }, 2000);
       }
 
@@ -832,7 +971,7 @@ async function startReceiver(meta) {
     if (!canDisk) {
       addMsg(`<span class="muted">⚠️ Large file (${fmtBytes(meta.size)}) cannot be received in memory. Use HTTPS/localhost to enable disk saving.</span>`);
       setStatus("⚠️ Large file needs disk saving (HTTPS/localhost).");
-      try { dc?.send(JSON.stringify({ type: "cancel" })); } catch {}
+      try { dc?.send(JSON.stringify({ type: "cancel" })); } catch { }
       incomingFile = null;
       return;
     }
@@ -844,7 +983,7 @@ async function startReceiver(meta) {
     } catch (e) {
       addMsg(`<span class="muted">❌ Save canceled. Large file cannot continue.</span>`);
       setStatus("❌ Save canceled (large file).");
-      try { dc?.send(JSON.stringify({ type: "cancel" })); } catch {}
+      try { dc?.send(JSON.stringify({ type: "cancel" })); } catch { }
       incomingFile = null;
       return;
     }
@@ -852,7 +991,7 @@ async function startReceiver(meta) {
     addMsg(`<span class="muted">ℹ️ Saving in memory (small/medium). Download will start after complete.</span>`);
   }
 
-  try { dc?.send(JSON.stringify({ type: "ready" })); } catch {}
+  try { dc?.send(JSON.stringify({ type: "ready" })); } catch { }
 }
 
 async function flushDiskQueue() {
