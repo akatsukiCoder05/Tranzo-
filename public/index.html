@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>WebRTC P2P File Transfer</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+
+  <style>
+    #chatBox { height: 220px; overflow-y: auto; }
+    .msg { margin-bottom: 8px; }
+    .muted { color:#666; font-size: 13px; }
+    progress { width: 100%; height: 18px; }
+
+    .dot {
+      display:inline-block;
+      width:10px; height:10px;
+      border-radius:50%;
+      background:#dc3545;
+      margin-right:6px;
+      vertical-align:middle;
+    }
+    .dot.green { background:#198754; }
+
+    #modalBg {
+      position: fixed; inset:0; background: rgba(0,0,0,0.35);
+      display:none; align-items:center; justify-content:center;
+      z-index: 1050;
+    }
+    #modal {
+      background:#fff; width: min(520px, 92vw);
+      border-radius: 12px; padding: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    }
+  </style>
+</head>
+
+<body class="bg-light">
+  <div class="container py-4">
+    <h2 class="mb-3">Welcome to Tranzo File Transfer (Default: Memory Download)</h2>
+
+    <div class="card shadow-sm mb-3">
+      <div class="card-body">
+        <div class="row g-2 align-items-center">
+          <div class="col-md-3">
+            <!-- ✅ NEW: Device name -->
+            <input class="form-control" type="text" id="deviceName" placeholder="Your Device Name">
+          </div>
+
+          <div class="col-md-3">
+            <input class="form-control" type="text" id="roomId" placeholder="Enter Room ID">
+          </div>
+
+          <div class="col-md-auto d-flex gap-2">
+            <button class="btn btn-outline-primary" id="createBtn">Create</button>
+            <button class="btn btn-primary" id="joinBtn">Join</button>
+          </div>
+
+          <div class="col-md">
+            <span class="dot" id="connDot"></span>
+            <span id="status" class="muted">Not Connected</span>
+            <div id="roomHint" class="muted mt-1"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-3" id="chatSection" style="display:none;">
+      <div class="card-body">
+        <div id="chatBox" class="border rounded p-2 bg-white"></div>
+
+        <div class="row g-2 mt-2">
+          <div class="col">
+            <input class="form-control" type="text" id="messageInput" placeholder="Type message">
+          </div>
+          <div class="col-auto">
+            <button class="btn btn-success" id="sendBtn">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title mb-2">Send File (P2P)</h5>
+
+        <input class="form-control" type="file" id="fileInput" />
+
+        <div class="muted mt-2">
+          Default: memory download (small/medium files). Large files will require disk saving (HTTPS/localhost).
+        </div>
+
+        <div class="mt-3">
+          <div id="fileStatus" class="muted mb-2">Idle</div>
+
+          <progress id="progressBar" value="0" max="100"></progress>
+
+          <div class="d-flex flex-wrap gap-3 align-items-center mt-2">
+            <div class="muted">
+              Progress: <b id="progressText">0%</b>
+            </div>
+            <div id="speedText" class="muted">Speed: 0 MB/s</div>
+            <div id="etaText" class="muted">Remaining: --</div>
+
+            <div class="ms-auto d-flex gap-2">
+              <button class="btn btn-outline-secondary btn-sm" id="pauseBtn" disabled>Pause</button>
+              <button class="btn btn-primary btn-sm" id="resumeBtn" disabled>Resume</button>
+              <button class="btn btn-outline-danger btn-sm" id="cancelBtn" disabled>Cancel</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Incoming popup -->
+  <div id="modalBg">
+    <div id="modal" class="border">
+      <h3 class="h5">Incoming File</h3>
+      <pre id="modalInfo" class="muted mb-3" style="white-space: pre-wrap;"></pre>
+
+      <div class="d-flex justify-content-end gap-2">
+        <button class="btn btn-outline-danger" id="rejectBtn">Reject</button>
+        <button class="btn btn-primary" id="acceptBtn">Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="script.js"></script>
+
+  <!-- aapka candy css same reh sakta hai (aapka already file me hai) -->
+</body>
+</html>
+  <style>
+    /* ====== TOFFEE / CANDY THEME (NO HTML CHANGES) ====== */
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap");
+
+:root{
+  --bg1:#fff6f0;          /* creamy */
+  --bg2:#ffe7f1;          /* strawberry milk */
+  --card:rgba(255,255,255,.78);
+  --cardBorder:rgba(255,255,255,.55);
+
+  --text:#2a1b1b;
+  --muted:#6f5a5a;
+
+  --primary:#ff4d6d;      /* candy pink */
+  --primary2:#ff8a00;     /* caramel orange */
+  --success:#16a34a;
+  --danger:#ef4444;
+
+  --shadow: 0 18px 50px rgba(31, 12, 12, 0.18);
+  --shadowSm: 0 10px 26px rgba(31, 12, 12, 0.12);
+
+  --r12: 12px;
+  --r16: 16px;
+  --r20: 20px;
+}
+
+/* Base */
+*{ box-sizing:border-box; }
+body{
+  font-family:"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+  color:var(--text);
+  min-height:100vh;
+  /* toffee swirl background */
+  background:
+    radial-gradient(1200px 800px at 10% 0%, rgba(255, 138, 0, .20), transparent 60%),
+    radial-gradient(900px 700px at 90% 15%, rgba(255, 77, 109, .22), transparent 55%),
+    radial-gradient(900px 800px at 50% 110%, rgba(255, 199, 0, .18), transparent 60%),
+    linear-gradient(135deg, var(--bg1), var(--bg2));
+}
+
+/* Make container feel premium */
+.container{
+  max-width: 980px;
+}
+
+/* Title */
+h2{
+  font-weight:800;
+  letter-spacing:-0.02em;
+  margin-bottom:14px !important;
+  background: linear-gradient(90deg, var(--primary), var(--primary2));
+  -webkit-background-clip:text;
+  background-clip:text;
+  color:transparent;
+}
+
+/* Cards: glassy candy */
+.card{
+  border: 1px solid var(--cardBorder) !important;
+  background: var(--card) !important;
+  border-radius: var(--r20) !important;
+  box-shadow: var(--shadowSm) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  overflow:hidden;
+}
+.card-body{
+  padding: 18px !important;
+}
+
+/* “soft top highlight” */
+.card::before{
+  content:"";
+  display:block;
+  height: 10px;
+  background: linear-gradient(90deg, rgba(255,77,109,.85), rgba(255,138,0,.85));
+  opacity:.25;
+}
+
+/* Inputs */
+.form-control{
+  border-radius: 14px !important;
+  border: 1px solid rgba(60,20,20,.12) !important;
+  background: rgba(255,255,255,.82) !important;
+  box-shadow: 0 6px 16px rgba(40,12,12,.06);
+  padding: 12px 14px !important;
+}
+.form-control:focus{
+  border-color: rgba(255,77,109,.45) !important;
+  box-shadow:
+    0 0 0 0.2rem rgba(255,77,109,.18) !important;
+    /* 0 10px 22px rgba(40,12,12,.10) !important; */
+}
+
+/* Muted text */
+.muted{
+  color: var(--muted) !important;
+}
+
+/* Buttons – candy gradient */
+.btn{
+  border-radius: 14px !important;
+  font-weight:700 !important;
+  letter-spacing: .2px;
+  padding: 10px 14px !important;
+  transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+}
+.btn:active{ transform: translateY(1px); }
+.btn:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 14px 26px rgba(40,12,12,.12);
+}
+
+/* Primary = candy pink→orange */
+.btn-primary{
+  border: 0 !important;
+  background: linear-gradient(135deg, var(--primary), var(--primary2)) !important;
+}
+.btn-primary:hover{ filter: brightness(1.03); }
+
+/* Outline primary = glossy */
+.btn-outline-primary{
+  border: 1px solid rgba(255,77,109,.55) !important;
+  color: #b31a3b !important;
+  background: rgba(255,255,255,.55) !important;
+}
+.btn-outline-primary:hover{
+  color: #fff !important;
+  border-color: transparent !important;
+  background: linear-gradient(135deg, rgba(255,77,109,.95), rgba(255,138,0,.95)) !important;
+}
+
+/* Success button */
+.btn-success{
+  border:0 !important;
+  background: linear-gradient(135deg, #22c55e, #16a34a) !important;
+}
+
+/* Small control buttons */
+.btn-sm{
+  border-radius: 12px !important;
+  padding: 8px 12px !important;
+}
+.btn-outline-secondary{
+  background: rgba(255,255,255,.55) !important;
+  border: 1px solid rgba(60,20,20,.16) !important;
+}
+.btn-outline-danger{
+  background: rgba(255,255,255,.55) !important;
+  border: 1px solid rgba(239,68,68,.45) !important;
+}
+
+/* Connection dot glow */
+.dot{
+  box-shadow: 0 0 0 4px rgba(220,53,69,.12);
+}
+.dot.green{
+  box-shadow: 0 0 0 4px rgba(25,135,84,.14);
+}
+
+/* Chat box */
+#chatBox{
+  height: 240px !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(60,20,20,.10) !important;
+  background:
+    radial-gradient(600px 260px at 0% 0%, rgba(255,138,0,.12), transparent 55%),
+    radial-gradient(600px 260px at 100% 0%, rgba(255,77,109,.12), transparent 55%),
+    rgba(255,255,255,.78) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.55);
+}
+
+/* Messages (if you use .msg inside chat) */
+.msg{
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.72);
+  border: 1px solid rgba(60,20,20,.08);
+  box-shadow: 0 8px 18px rgba(40,12,12,.06);
+}
+.msg .muted{
+  font-size: 12px !important;
+}
+
+/* Progress (native <progress>) */
+progress{
+  width:100%;
+  height: 18px;
+  border-radius: 999px;
+  overflow:hidden;
+  background: rgba(255,255,255,.55);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 10px 22px rgba(40,12,12,.08);
+  border: 1px solid rgba(60,20,20,.10);
+}
+progress::-webkit-progress-bar{
+  background: rgba(255,255,255,.55);
+}
+progress::-webkit-progress-value{
+  background: linear-gradient(90deg, var(--primary), var(--primary2));
+  border-radius: 999px;
+}
+progress::-moz-progress-bar{
+  background: linear-gradient(90deg, var(--primary), var(--primary2));
+  border-radius: 999px;
+}
+
+/* File section headings */
+.card-title{
+  font-weight: 800 !important;
+  letter-spacing:-0.01em;
+}
+
+/* Modal overlay + modal candy glass */
+#modalBg{
+  background: rgba(20,10,10,0.45) !important;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+#modal{
+  border: 1px solid rgba(255,255,255,.55) !important;
+  border-radius: 18px !important;
+  background:
+    radial-gradient(700px 300px at 10% 0%, rgba(255,138,0,.18), transparent 60%),
+    radial-gradient(700px 300px at 90% 0%, rgba(255,77,109,.18), transparent 60%),
+    rgba(255,255,255,.82) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+/* Pre in modal */
+#modal pre{
+  background: rgba(255,255,255,.65);
+  border: 1px dashed rgba(60,20,20,.18);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+/* Small polish on borders used in HTML */
+.border{
+  border-color: rgba(60,20,20,.10) !important;
+}
+.bg-white{
+  background: rgba(255,255,255,.78) !important;
+}
+
+/* Make layout breathe on mobile */
+@media (max-width: 576px){
+  .card-body{ padding: 14px !important; }
+  h2{ font-size: 1.35rem; }
+  #chatBox{ height: 220px !important; }
+}
+  </style>
+</body>
+</html>
