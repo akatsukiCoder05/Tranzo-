@@ -41,7 +41,10 @@ const rejectBtn = document.getElementById("rejectBtn");
 function defaultDeviceName() {
   const ua = navigator.userAgent || "";
   const isMobile = /Android|iPhone|iPad|iPod/i.test(ua);
-  const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "Device";
+  const platform =
+    (navigator.userAgentData && navigator.userAgentData.platform) ||
+    navigator.platform ||
+    "Device";
 
   const browser =
     ua.includes("Edg") ? "Edge" :
@@ -58,7 +61,8 @@ function getDeviceName() {
 }
 
 if (deviceNameInput) {
-  deviceNameInput.value = localStorage.getItem("deviceName") || defaultDeviceName();
+  deviceNameInput.value =
+    localStorage.getItem("deviceName") || defaultDeviceName();
   deviceNameInput.addEventListener("input", () => {
     localStorage.setItem("deviceName", getDeviceName());
   });
@@ -110,7 +114,7 @@ let currentRoom = "";
 function joinRoom(roomId, mode) {
   currentRoom = roomId;
 
-  // ✅ CHANGED: send deviceName with join-room
+  // ✅ send deviceName with join-room
   socket.emit("join-room", { roomId, deviceName: getDeviceName() });
 
   chatSection.style.display = "block";
@@ -150,15 +154,33 @@ sendBtn.onclick = () => {
   messageInput.value = "";
 };
 
-// ✅ already good: server will send user = deviceName
+// server sends user = deviceName
 socket.on("receive-message", (data) => addMsg(`<b>${data.user}:</b> ${data.text}`));
 
-// ================= WebRTC (rest of your code unchanged) =================
+// ================= WebRTC =================
+// ✅ CHANGE: TURN added (remote / strict NAT fix). STUN-only often fails.
 const RTC_CONFIG = {
   iceServers: [
+    // STUN (free)
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+
+    // ✅ TURN (REQUIRED for many networks)
+    // Fill real TURN details here:
+    {
+      urls: [
+        "turn:YOUR_DOMAIN:3478?transport=udp",
+        "turn:YOUR_DOMAIN:3478?transport=tcp",
+        "turns:YOUR_DOMAIN:5349?transport=tcp"
+      ],
+      username: "TURN_USER",
+      credential: "TURN_PASS",
+    },
   ],
+
+  // Optional debug:
+  // iceTransportPolicy: "all",   // default
+  // iceTransportPolicy: "relay" // force TURN only (test)
 };
 
 let pc = null;
@@ -199,12 +221,12 @@ let sendState = {
 // Receiver state
 let incomingFile = null;
 
-// ✅ watchdog timer id
+// watchdog timer id
 let doneResendTimer = null;
-// ✅ last status from receiver
+// last status from receiver
 let lastStatusRes = null;
 
-// ===== NEW: READY handshake (fix 99% stuck) =====
+// ===== READY handshake (fix 99% stuck) =====
 let receiverReady = false;
 let receiverReadyResolver = null;
 function resetReceiverReady() {
@@ -229,6 +251,9 @@ function markReceiverReady(ok = true) {
     r(!!ok);
   }
 }
+
+// ✅ NEW: retry guard
+let retryInProgress = false;
 
 // Buttons
 pauseBtn.onclick = () => {
@@ -266,6 +291,7 @@ function safeClosePeer() {
   }
 
   resetReceiverReady();
+  retryInProgress = false;
   setTimeout(() => (gracefulClosing = false), 800);
 }
 
@@ -307,14 +333,47 @@ async function createPeerConnection() {
   pc.oniceconnectionstatechange = () => {
     console.log("[P2P] iceConnectionState:", pc.iceConnectionState);
   };
+
+  // ✅ CHANGE: auto-retry on failed (no unnecessary logic change)
   pc.onconnectionstatechange = () => {
     console.log("[P2P] connectionState:", pc.connectionState);
+
+    if (pc.connectionState === "failed") {
+      // Often means ICE failed (need TURN)
+      addMsg(`<span class="muted">⚠️ Connection failed. Retrying...</span>`);
+
+      // avoid infinite loops
+      if (retryInProgress) return;
+      retryInProgress = true;
+
+      try { dc?.close(); } catch {}
+      try { pc?.close(); } catch {}
+      dc = null;
+      pc = null;
+
+      // retry after short delay if we still have peer
+      if (peerSocketId && !transferCompleted && !sendState.canceled) {
+        setTimeout(() => {
+          // If we were sender and have outgoing file, reconnect
+          makeOfferAndConnect()
+            .then(() => { retryInProgress = false; })
+            .catch(() => { retryInProgress = false; });
+        }, 900);
+      } else {
+        retryInProgress = false;
+      }
+    }
   };
 
   pc.onicecandidate = (e) => {
     if (e.candidate && peerSocketId) {
       socket.emit("webrtc-ice", { to: peerSocketId, candidate: e.candidate });
     }
+  };
+
+  // ✅ optional debug (helps when TURN creds wrong)
+  pc.onicecandidateerror = (e) => {
+    console.log("[P2P] icecandidateerror:", e?.errorCode, e?.errorText, e?.url);
   };
 
   pc.ondatachannel = (event) => {
@@ -465,6 +524,7 @@ fileInput.addEventListener("change", () => {
   transferCompleted = false;
   gracefulClosing = false;
   resetReceiverReady();
+  retryInProgress = false;
 
   outgoingFile = file;
   resetTransferUI();
@@ -473,7 +533,7 @@ fileInput.addEventListener("change", () => {
   socket.emit("file-offer", { name: file.name, size: file.size, type: file.type || "application/octet-stream" });
 });
 
-// ✅ CHANGED: server now sends fromName (device name)
+// server sends fromName (device name)
 socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
   pendingIncoming = { from, meta };
   const who = fromName || fromShort || (from ? from.substring(0, 5) : "User");
@@ -494,6 +554,7 @@ acceptBtn.onclick = async () => {
   transferCompleted = false;
   gracefulClosing = false;
   resetReceiverReady();
+  retryInProgress = false;
 
   socket.emit("file-answer", { to: pendingIncoming.from, accepted: true });
   peerSocketId = pendingIncoming.from;
@@ -628,6 +689,7 @@ async function sendFile(file) {
   sendState.gotComplete = false;
 
   resetReceiverReady();
+  retryInProgress = false;
 
   // meta
   try {
@@ -736,7 +798,7 @@ async function sendFile(file) {
   fileWorker.postMessage({ type: "pull" });
 }
 
-// ===== Receiver (rest same) =====
+// ===== Receiver =====
 async function startReceiver(meta) {
   resetTransferUI();
   cancelBtn.disabled = false;
