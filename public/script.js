@@ -4,6 +4,252 @@ const socket = io();
 const DEBUG = true;
 const dlog = (...a) => DEBUG && console.log("[P2P]", ...a);
 
+let fileQueue = [];
+let sending = false;
+
+
+
+// ================= Queue UI (NO HTML change) =================
+// Shows selected/sending/pending files inside the Send File card area
+let queueWrap = null;
+let queueListEl = null;
+let queueCountEl = null;
+
+function ensureQueueUI() {
+  if (queueWrap && queueListEl && queueCountEl) return;
+  if (!fileInput) return;
+
+  // Place near file input (inside same card/section)
+  const host = fileInput.closest(".card") || fileInput.parentElement || document.body;
+
+  queueWrap = document.createElement("div");
+  queueWrap.style.marginTop = "10px";
+
+  queueWrap.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-weight:800;">📦 Queue</div>
+      <div id="queueCount" style="opacity:.7;font-size:12px;">0</div>
+    </div>
+    <div id="queueList" style="
+      margin-top:8px;
+      max-height:140px;
+      overflow:auto;
+      border:1px solid rgba(0,0,0,.10);
+      border-radius:12px;
+      padding:8px;
+      background: rgba(255,255,255,.6);
+    "></div>
+  `;
+
+  queueListEl = queueWrap.querySelector("#queueList");
+  queueCountEl = queueWrap.querySelector("#queueCount");
+  host.appendChild(queueWrap);
+}
+
+function renderQueueUI(currentFile = null) {
+  if (!fileInput) return;
+  ensureQueueUI();
+  if (!queueListEl || !queueCountEl) return;
+
+  const total = fileQueue.length + (currentFile ? 1 : 0);
+  queueCountEl.innerText = `${total} file(s)`;
+
+  const items = [];
+
+  if (currentFile) {
+    items.push(`
+      <div style="padding:6px 8px;border-radius:10px;background:rgba(255,210,120,.25);margin-bottom:6px;">
+        ▶️ <b>Sending:</b> ${currentFile.name}
+        <span style="opacity:.7">(${fmtBytes(currentFile.size)})</span>
+      </div>
+    `);
+  }
+
+  if (fileQueue.length === 0 && !currentFile) {
+    items.push(`<div style="opacity:.7;padding:6px 8px;">No files in queue</div>`);
+  } else {
+    fileQueue.forEach((f, i) => {
+      items.push(`
+        <div style="padding:6px 8px;border-radius:10px;background:rgba(0,0,0,.03);margin-bottom:6px;">
+          ${i + 1}. ${f.name} <span style="opacity:.7">(${fmtBytes(f.size)})</span>
+        </div>
+      `);
+    });
+  }
+
+  queueListEl.innerHTML = items.join("");
+}
+
+
+// ================= Receiver Queue UI + Auto-Accept (NO HTML change) =================
+// First incoming file asks for Accept. After you accept once, it auto-accepts remaining files in this room session.
+let recvQueueWrap = null;
+let recvQueueListEl = null;
+let recvQueueCountEl = null;
+
+// histories (for grey "done" tracking)
+const sentHistory = [];   // {id,name,size,state,done,total}
+const recvHistory = [];   // {id,name,size,state,done,total}
+
+// auto-accept flag (per room session)
+let autoAcceptThisRoom = false;
+
+function autoAcceptKey() {
+  return `autoAccept:${currentRoom || ""}`;
+}
+
+function loadAutoAcceptFlag() {
+  try { autoAcceptThisRoom = sessionStorage.getItem(autoAcceptKey()) === "1"; } catch { autoAcceptThisRoom = false; }
+}
+
+function saveAutoAcceptFlag(v) {
+  autoAcceptThisRoom = !!v;
+  try { sessionStorage.setItem(autoAcceptKey(), v ? "1" : "0"); } catch {}
+}
+
+function ensureRecvQueueUI() {
+  if (recvQueueWrap && recvQueueListEl && recvQueueCountEl) return;
+  if (!fileInput) return;
+
+  const host = fileInput.closest(".card") || fileInput.parentElement || document.body;
+
+  recvQueueWrap = document.createElement("div");
+  recvQueueWrap.style.marginTop = "10px";
+
+  recvQueueWrap.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-weight:800;">📥 Receiver Queue</div>
+      <div id="recvQueueCount" style="opacity:.7;font-size:12px;">0</div>
+    </div>
+    <div id="recvQueueList" style="
+      margin-top:8px;
+      max-height:140px;
+      overflow:auto;
+      border:1px solid rgba(0,0,0,.10);
+      border-radius:12px;
+      padding:8px;
+      background: rgba(255,255,255,.6);
+    "></div>
+  `;
+
+  recvQueueListEl = recvQueueWrap.querySelector("#recvQueueList");
+  recvQueueCountEl = recvQueueWrap.querySelector("#recvQueueCount");
+  host.appendChild(recvQueueWrap);
+}
+
+function renderRecvQueueUI() {
+  if (!fileInput) return;
+  ensureRecvQueueUI();
+  if (!recvQueueListEl || !recvQueueCountEl) return;
+
+  const pending = recvHistory.filter(x => x.state === "pending" || x.state === "receiving");
+  const done = recvHistory.filter(x => x.state === "done" || x.state === "canceled");
+
+  const total = pending.length + done.length;
+  recvQueueCountEl.innerText = `${total} file(s)`;
+
+  const items = [];
+
+  pending.forEach((it) => {
+    const pct = it.total ? Math.floor((it.done / it.total) * 100) : 0;
+    const bar = `<div style="height:8px;border-radius:999px;background:rgba(0,0,0,.08);overflow:hidden;margin-top:6px;">
+      <div style="height:100%;width:${Math.min(100,pct)}%;background:linear-gradient(90deg,#ff4d6d,#ffa63d);"></div>
+    </div>`;
+    items.push(`
+      <div style="padding:8px 10px;border-radius:12px;background:rgba(255,210,120,.18);margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;gap:10px;">
+          <div style="font-weight:700;">${it.state === "receiving" ? "⬇️ Receiving" : "🕒 Pending"}: ${it.name}</div>
+          <div style="opacity:.7;font-size:12px;">${fmtBytes(it.size)}</div>
+        </div>
+        <div style="opacity:.75;font-size:12px;margin-top:4px;">${pct}% (${fmtBytes(it.done)} / ${fmtBytes(it.total)})</div>
+        ${bar}
+      </div>
+    `);
+  });
+
+  done.forEach((it) => {
+    const label = it.state === "done" ? "✅ Received" : "❌ Canceled";
+    items.push(`
+      <div style="padding:8px 10px;border-radius:12px;background:rgba(0,0,0,.06);margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;gap:10px;">
+          <div style="font-weight:700;color:#555;">${label}: ${it.name}</div>
+          <div style="opacity:.7;font-size:12px;color:#555;">${fmtBytes(it.size)}</div>
+        </div>
+      </div>
+    `);
+  });
+
+  if (items.length === 0) items.push(`<div style="opacity:.7;padding:6px 8px;">No received files yet</div>`);
+  recvQueueListEl.innerHTML = items.join("");
+}
+
+function upsertSentItem(id, name, size, state, done = 0, total = size || 0) {
+  if (!id) id = `${name}|${size}`;
+  let it = sentHistory.find(x => x.id === id);
+  if (!it) { it = { id, name, size, state, done, total }; sentHistory.push(it); }
+  it.name = name; it.size = size; it.state = state;
+  it.done = Math.max(it.done || 0, done || 0);
+  it.total = total || it.total || size || 0;
+  return it;
+}
+
+function upsertRecvItem(id, name, size, state, done = 0, total = size || 0) {
+  if (!id) id = `${name}|${size}`;
+  let it = recvHistory.find(x => x.id === id);
+  if (!it) { it = { id, name, size, state, done, total }; recvHistory.push(it); }
+  it.name = name; it.size = size; it.state = state;
+  it.done = Math.max(it.done || 0, done || 0);
+  it.total = total || it.total || size || 0;
+  return it;
+}
+
+function enqueueFilesForSend(files) {
+  const arr = Array.from(files || []);
+  if (!arr.length) return;
+
+  arr.forEach((file) => {
+    try { file._qid = file._qid || (crypto?.randomUUID ? crypto.randomUUID() : (Date.now() + "-" + Math.random())); }
+    catch { file._qid = file._qid || (Date.now() + "-" + Math.random()); }
+
+    fileQueue.push(file);
+    upsertSentItem(file._qid, file.name, file.size, "queued", 0, file.size);
+    addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
+  });
+
+  try { renderQueueUI(sending ? outgoingFile : null); } catch {}
+  startNextFile();
+}
+
+function enableDragDrop() {
+  if (!fileInput) return;
+  const host = fileInput.closest(".card") || fileInput.parentElement || document.body;
+
+  let overlay = document.getElementById("dropOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "dropOverlay";
+    overlay.style.cssText = "position:relative;margin-top:10px;border:2px dashed rgba(0,0,0,.18);border-radius:16px;padding:14px;text-align:center;opacity:.75;user-select:none;";
+    overlay.innerHTML = "🖱 Drag & Drop files here";
+    host.appendChild(overlay);
+  }
+
+  const onDragOver = (e) => { e.preventDefault(); overlay.style.opacity = "1"; overlay.style.borderColor = "rgba(255,140,60,.7)"; };
+  const onDragLeave = () => { overlay.style.opacity = ".75"; overlay.style.borderColor = "rgba(0,0,0,.18)"; };
+  const onDrop = (e) => {
+    e.preventDefault();
+    onDragLeave();
+    if (!currentRoom) {
+      alert("Please create or join a room first.");
+      return;
+    }
+    const files = e.dataTransfer?.files;
+    if (files && files.length) enqueueFilesForSend(files);
+  };
+
+  overlay.addEventListener("dragover", onDragOver);
+  overlay.addEventListener("dragleave", onDragLeave);
+  overlay.addEventListener("drop", onDrop);
+}
 // UI
 const joinBtn = document.getElementById("joinBtn");
 const createBtn = document.getElementById("createBtn");
@@ -21,6 +267,8 @@ const messageInput = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
 
 const fileInput = document.getElementById("fileInput");
+// ✅ Drag & Drop support
+setTimeout(() => { try { enableDragDrop(); } catch {} }, 0);
 const fileStatus = document.getElementById("fileStatus");
 const progressBar = document.getElementById("progressBar");
 const speedText = document.getElementById("speedText");
@@ -59,6 +307,8 @@ function getDeviceName() {
   const v = (deviceNameInput?.value || "").trim();
   return v || defaultDeviceName();
 }
+
+try { ensureQueueUI(); ensureRecvQueueUI(); } catch {}
 
 if (deviceNameInput) {
   deviceNameInput.value =
@@ -168,6 +418,8 @@ function setProgressBytes(doneBytes, totalBytes) {
 let currentRoom = "";
 function joinRoom(roomId, mode) {
   currentRoom = roomId;
+
+  loadAutoAcceptFlag();
 
   // ✅ send deviceName with join-room
   socket.emit("join-room", { roomId, deviceName: getDeviceName() });
@@ -358,7 +610,7 @@ resumeBtn.onclick = () => {
     fileWorker?.postMessage({ type: "pull" });
   } catch { }
 };
-cancelBtn.onclick = () => cancelTransfer("You canceled transfer", true);
+cancelBtn.onclick = () => cancelTransfer("You canceled transfer", true, getDeviceName());
 
 function safeClosePeer() {
   gracefulClosing = true;
@@ -378,7 +630,7 @@ function safeClosePeer() {
   setTimeout(() => (gracefulClosing = false), 800);
 }
 
-function cancelTransfer(reason, notifyPeer) {
+function cancelTransfer(reason, notifyPeer, canceledBy) {
   if (transferCompleted) return;
 
   if (doneResendTimer) {
@@ -391,9 +643,9 @@ function cancelTransfer(reason, notifyPeer) {
   if (sendState.running) {
     sendState.canceled = true;
     try { fileWorker?.postMessage({ type: "cancel" }); } catch { }
-    try { if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "cancel" })); } catch { }
+    try { if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "cancel", by: canceledBy || getDeviceName() })); } catch { }
     if (notifyPeer && peerSocketId) {
-      try { socket.emit("file-cancel", { to: peerSocketId }); } catch { }
+      try { socket.emit("file-cancel", { to: peerSocketId, by: canceledBy || getDeviceName(), reason }); } catch { }
     }
   }
 
@@ -402,11 +654,19 @@ function cancelTransfer(reason, notifyPeer) {
   resetTransferUI();
   safeClosePeer();
   addMsg(`<span class="muted">❌ ${reason}</span>`);
+  try {
+    const f = sendState?.file || outgoingFile;
+    if (f) upsertSentItem(f._qid || `${f.name}|${f.size}`, f.name, f.size, "canceled", sendState?.ackBytes || 0, f.size);
+    renderQueueUI(null);
+    renderRecvQueueUI();
+  } catch {}
+  try { renderQueueUI(null); } catch {}
 }
 
-socket.on("file-cancel", () => {
+socket.on("file-cancel", (data) => {
   if (transferCompleted) return;
-  cancelTransfer("Sender canceled transfer", false);
+  const by = data?.by || "Peer";
+  cancelTransfer(`${by} canceled transfer`, false);
 });
 
 // ===== Extra log helpers (exact reason) =====
@@ -586,6 +846,11 @@ function setupDataChannel() {
         sendState.gotComplete = true;
         transferCompleted = true;
         setStatus(`✅ Sent: ${sendState.file?.name || ""}`);
+        try {
+          const f = sendState.file;
+          if (f) upsertSentItem(f._qid || `${f.name}|${f.size}`, f.name, f.size, "done", f.size, f.size);
+          renderQueueUI(null);
+        } catch {}
         setProgressBytes(sendState.file?.size || 0, sendState.file?.size || 1);
         etaText.innerText = "Remaining: 0m 0s";
 
@@ -595,6 +860,10 @@ function setupDataChannel() {
         pauseBtn.disabled = true;
         resumeBtn.disabled = true;
         cancelBtn.disabled = true;
+
+        sending = false;
+        try { renderQueueUI(null); } catch {}
+        startNextFile();
 
         safeClosePeer();
         return;
@@ -608,7 +877,11 @@ function setupDataChannel() {
 
       if (msg.type === "cancel") {
         dlog("RX cancel");
-        cancelTransfer("Sender canceled transfer", false);
+        try {
+          const id = incomingFile?.meta?.id || `${incomingFile?.meta?.name}|${incomingFile?.meta?.size}`;
+          if (id && incomingFile?.meta) { upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "canceled", incomingFile.receivedBytes || 0, incomingFile.meta.size || 0); renderRecvQueueUI(); }
+        } catch {}
+        cancelTransfer(`${msg.by || "Peer"} canceled transfer`, false);
         return;
       }
       return;
@@ -653,12 +926,45 @@ socket.on("webrtc-ice", async ({ candidate }) => {
 
 // File offer UI
 fileInput.addEventListener("change", () => {
-  const file = fileInput.files[0];
-  if (!file) return;
+
+  const files = Array.from(fileInput.files);   // ✅ multiple files
+
+  // ✅ Queue-based multi-send
+  enqueueFilesForSend(files);
+
+  // Keep below lines as-is (no removal) but prevent double handling
+  fileInput.value = "";
+  return;
+  if (!files.length) return;
+
   if (!currentRoom) {
     alert("Please create or join a room first.");
     return;
   }
+
+  // loop through selected files
+  files.forEach(file => {
+
+    fileQueue.push(file);
+
+    addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
+
+  });
+
+  try { renderQueueUI(sending ? outgoingFile : null); } catch {}
+
+  startNextFile();
+
+});
+
+function startNextFile() {
+
+  if (sending) return;
+  if (fileQueue.length === 0) return;
+
+  const file = fileQueue.shift();
+
+  sending = true;
 
   transferCompleted = false;
   gracefulClosing = false;
@@ -667,22 +973,53 @@ fileInput.addEventListener("change", () => {
 
   outgoingFile = file;
   resetTransferUI();
-  setStatus(`Waiting for receiver... (${file.name}, ${fmtBytes(file.size)})`);
 
-  socket.emit("file-offer", { name: file.name, size: file.size, type: file.type || "application/octet-stream" });
-});
+  setStatus(`Waiting for receiver... (${file.name}, ${fmtBytes(file.size)})`);
+  try { renderQueueUI(file); } catch {}
+
+  socket.emit("file-offer", {
+    id: file._qid || `${file.name}|${file.size}`,
+    name: file.name,
+    size: file.size,
+    type: file.type || "application/octet-stream"
+  });
+}
 
 // server sends fromName (device name)
+
 socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
   pendingIncoming = { from, meta };
+
+  try {
+    const id = meta?.id || `${meta?.name}|${meta?.size}`;
+    upsertRecvItem(id, meta?.name, meta?.size || 0, "pending", 0, meta?.size || 0);
+    renderRecvQueueUI();
+  } catch {}
+
   const who = fromName || fromShort || (from ? from.substring(0, 5) : "User");
+
+  if (autoAcceptThisRoom) {
+    addMsg(`<span class="muted">✅ Auto-accepted from <b>${who}</b>: ${meta.name} (${fmtBytes(meta.size)})</span>`);
+    socket.emit("file-answer", { to: from, accepted: true });
+    peerSocketId = from;
+    pendingIncoming = null;
+    modalBg.style.display = "none";
+    setStatus("Auto-accepted. Connecting P2P...");
+    return;
+  }
+
   modalInfo.innerText = `From: ${who}\nFile: ${meta.name}\nSize: ${fmtBytes(meta.size)}\nType: ${meta.type}`;
   modalBg.style.display = "flex";
 });
 
+
 rejectBtn.onclick = () => {
   if (!pendingIncoming) return;
   socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
+  try {
+    const id = pendingIncoming?.meta?.id || `${pendingIncoming?.meta?.name}|${pendingIncoming?.meta?.size}`;
+    if (id && pendingIncoming?.meta) { upsertRecvItem(id, pendingIncoming.meta.name, pendingIncoming.meta.size || 0, "canceled", 0, pendingIncoming.meta.size || 0); renderRecvQueueUI(); }
+  } catch {}
   pendingIncoming = null;
   modalBg.style.display = "none";
 };
@@ -696,6 +1033,12 @@ acceptBtn.onclick = async () => {
   retryInProgress = false;
 
   socket.emit("file-answer", { to: pendingIncoming.from, accepted: true });
+
+  // ✅ After first accept, auto-accept remaining files in this room session
+  if (!autoAcceptThisRoom) {
+    saveAutoAcceptFlag(true);
+    addMsg(`<span class="muted">✅ Auto-accept enabled for this room (next files won\'t ask again)</span>`);
+  }
   peerSocketId = pendingIncoming.from;
   pendingIncoming = null;
   modalBg.style.display = "none";
@@ -748,7 +1091,7 @@ function waitForBufferedZero(timeoutMs = 45000) {
 }
 
 async function waitForAckWindow() {
-  const MAX_AHEAD = 16 * 1024 * 1024;
+  const MAX_AHEAD = 128 * 1024 * 1024;
   while (sendState.running && !sendState.canceled) {
     const ahead = sendState.offset - sendState.ackBytes;
     if (ahead <= MAX_AHEAD) return;
@@ -761,6 +1104,7 @@ function updateSenderUIByAck() {
   if (!file) return;
 
   setProgressBytes(sendState.ackBytes, file.size);
+  try { upsertSentItem(file._qid || `${file.name}|${file.size}`, file.name, file.size, "sending", sendState.ackBytes, file.size); renderQueueUI(file); } catch {}
 
   const now = performance.now();
   const dt = (now - sendState.lastAckTickT) / 1000;
@@ -791,6 +1135,13 @@ function updateSenderUIByAck() {
 async function safeSendArrayBuffer(buf) {
   while (true) {
     if (!dc || dc.readyState !== "open") throw new Error("DataChannel not open");
+
+    // ✅ Hard safety gate (prevents OperationError when bufferedAmount spikes)
+    while (dc && dc.readyState === "open" && dc.bufferedAmount > (BUFFER_MAX - CHUNK_SIZE)) {
+      await waitForBufferDrain();
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
     try {
       dc.send(buf);
       return;
@@ -811,6 +1162,7 @@ async function sendFile(file) {
   setStatus(`Sending: ${file.name} (${fmtBytes(file.size)})`);
   addMsg(`<b>Sending:</b> ${file.name} (${fmtBytes(file.size)})`);
   dlog("sendFile start", { name: file.name, size: file.size });
+  try { upsertSentItem(file._qid || `${file.name}|${file.size}`, file.name, file.size, "sending", 0, file.size); renderQueueUI(file); } catch {}
 
   pauseBtn.disabled = false;
   resumeBtn.disabled = true;
@@ -834,7 +1186,7 @@ async function sendFile(file) {
   try {
     dc.send(JSON.stringify({
       type: "meta",
-      meta: { name: file.name, size: file.size, type: file.type || "application/octet-stream" },
+      meta: { id: file._qid || `${file.name}|${file.size}`, name: file.name, size: file.size, type: file.type || "application/octet-stream" },
     }));
   } catch (e) {
     dlog("meta send failed", e);
@@ -963,8 +1315,14 @@ async function startReceiver(meta) {
   };
 
   setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})`);
+  addMsg(`<span class="muted">📥 Incoming: ${meta.name} (${fmtBytes(meta.size)})</span>`);
   addMsg(`<b>Receiving:</b> ${meta.name} (${fmtBytes(meta.size)})`);
   dlog("startReceiver", meta);
+  try {
+    const id = meta?.id || `${meta?.name}|${meta?.size}`;
+    upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0);
+    renderRecvQueueUI();
+  } catch {}
 
   if (needDisk) {
     const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
@@ -1035,6 +1393,11 @@ async function handleIncomingChunk(buf) {
 
   incomingFile.receivedBytes += buf.byteLength;
   setProgressBytes(incomingFile.receivedBytes, incomingFile.meta.size);
+  try {
+    const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`;
+    upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "receiving", incomingFile.receivedBytes, incomingFile.meta.size || 0);
+    renderRecvQueueUI();
+  } catch {}
 
   if (dc && dc.readyState === "open") {
     if (
@@ -1102,6 +1465,11 @@ async function finalizeIncomingFile() {
       await flushDiskQueue();
       await incomingFile.writable.close();
       setStatus(`✅ Saved: ${incomingFile.meta.name}`);
+      try {
+        const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`;
+        upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "done", incomingFile.meta.size || 0, incomingFile.meta.size || 0);
+        renderRecvQueueUI();
+      } catch {}
       addMsg(`<b>Saved to disk:</b> ${incomingFile.meta.name}`);
     } else {
       const blob = new Blob(incomingFile.chunks, { type: incomingFile.meta.type });
@@ -1115,6 +1483,11 @@ async function finalizeIncomingFile() {
       setTimeout(() => URL.revokeObjectURL(url), 5000);
 
       setStatus(`✅ Received: ${incomingFile.meta.name}`);
+      try {
+        const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`;
+        upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "done", incomingFile.meta.size || 0, incomingFile.meta.size || 0);
+        renderRecvQueueUI();
+      } catch {}
       addMsg(`<b>File received:</b> ${incomingFile.meta.name}`);
     }
 
